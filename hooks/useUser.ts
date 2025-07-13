@@ -77,21 +77,37 @@ export const useUser = () => {
     const loadedGlobalReveals = loadFromStorage(GLOBAL_REVEALS_STORAGE_KEY, new Map<number, RevealData>());
     setGlobalReveals(loadedGlobalReveals);
     
-    const loadedUsers = loadFromStorage<Record<string, User>>(ALL_USERS_KEY, {});
-    setAllUsers(loadedUsers);
-
+    let loadedUsers = loadFromStorage<Record<string, User>>(ALL_USERS_KEY, {});
     const currentUserEmail = loadFromStorage<string | null>(CURRENT_USER_EMAIL_KEY, null);
     
     if (currentUserEmail && loadedUsers[currentUserEmail]) {
-      const currentUser = loadedUsers[currentUserEmail];
+      const currentUserData = loadedUsers[currentUserEmail];
       const today = getTodayDateString();
 
-      if (currentUser.lastUnlockDate !== today) {
-        currentUser.dailyUnlocks = DAILY_UNLOCK_LIMIT;
-        currentUser.lastUnlockDate = today;
+      // This is the critical fix: create new objects instead of mutating state.
+      if (currentUserData.lastUnlockDate !== today) {
+        const updatedCurrentUser = {
+          ...currentUserData,
+          dailyUnlocks: DAILY_UNLOCK_LIMIT,
+          lastUnlockDate: today,
+        };
+        const updatedUsers = {
+          ...loadedUsers,
+          [currentUserEmail]: updatedCurrentUser,
+        };
+        
+        saveToStorage(ALL_USERS_KEY, updatedUsers);
+        
+        setUser(updatedCurrentUser);
+        setAllUsers(updatedUsers);
+      } else {
+        setUser(currentUserData);
+        setAllUsers(loadedUsers);
       }
-      setUser(currentUser);
+    } else {
+        setAllUsers(loadedUsers);
     }
+    
     setIsLoading(false);
   }, []);
 
@@ -106,34 +122,38 @@ export const useUser = () => {
   }, []);
 
   const login = useCallback((email: string, username: string, profileUrl?: string) => {
-    setAllUsers(currentAllUsers => {
-        const today = getTodayDateString();
-        let userToLogin = currentAllUsers[email];
+    const today = getTodayDateString();
+    const currentAllUsers = allUsers;
+    let userToLogin = currentAllUsers[email];
+    
+    const isNewUser = !userToLogin;
 
-        if (!userToLogin) {
-          userToLogin = {
-            email,
-            username,
-            profileUrl: profileUrl || '',
-            dailyUnlocks: DAILY_UNLOCK_LIMIT,
-            lastUnlockDate: today,
-            revealedBlocks: new Set(),
-          };
-        } else {
-          if (userToLogin.lastUnlockDate !== today) {
-            userToLogin.dailyUnlocks = DAILY_UNLOCK_LIMIT;
-            userToLogin.lastUnlockDate = today;
-          }
-        }
-        
+    if (isNewUser) {
+      userToLogin = {
+        email,
+        username,
+        profileUrl: profileUrl || '',
+        dailyUnlocks: DAILY_UNLOCK_LIMIT,
+        lastUnlockDate: today,
+        revealedBlocks: new Set(),
+      };
+    } else if (userToLogin.lastUnlockDate !== today) {
+      // Create new object for immutability
+      userToLogin = {
+        ...userToLogin,
+        dailyUnlocks: DAILY_UNLOCK_LIMIT,
+        lastUnlockDate: today,
+      };
+    }
+    
+    if (isNewUser || userToLogin !== currentAllUsers[email]) {
         const updatedUsers = { ...currentAllUsers, [email]: userToLogin };
         saveAllUsers(updatedUsers);
-        
-        saveToStorage(CURRENT_USER_EMAIL_KEY, email);
-        setUser(userToLogin);
-        return updatedUsers;
-    });
-  }, [saveAllUsers]);
+    }
+    
+    saveToStorage(CURRENT_USER_EMAIL_KEY, email);
+    setUser(userToLogin);
+  }, [allUsers, saveAllUsers]);
 
   const logout = useCallback(() => {
     localStorage.removeItem(CURRENT_USER_EMAIL_KEY);
@@ -141,97 +161,82 @@ export const useUser = () => {
   }, []);
 
   const unlockBlock = useCallback((index: number) => {
-    if (!user || user.dailyUnlocks <= 0) return;
+    if (!user || user.dailyUnlocks <= 0 || globalReveals.has(index)) {
+        return;
+    }
     
-    setGlobalReveals(currentGlobalReveals => {
-      if(currentGlobalReveals.has(index)) return currentGlobalReveals;
-
-      const updatedUser: User = {
+    const updatedUser: User = {
         ...user,
         dailyUnlocks: user.dailyUnlocks - 1,
         revealedBlocks: new Set(user.revealedBlocks).add(index),
-      };
-      setUser(updatedUser);
+    };
 
-      setAllUsers(currentAllUsers => {
-          const updatedUsers = { ...currentAllUsers, [user.email]: updatedUser };
-          saveAllUsers(updatedUsers);
-          return updatedUsers;
-      });
+    const updatedAllUsers = { ...allUsers, [user.email]: updatedUser };
+    
+    const updatedGlobalReveals = new Map(globalReveals);
+    updatedGlobalReveals.set(index, { username: user.username, profileUrl: user.profileUrl });
 
-      const newGlobalReveals = new Map(currentGlobalReveals);
-      newGlobalReveals.set(index, { username: user.username, profileUrl: user.profileUrl });
-      saveGlobalReveals(newGlobalReveals);
-      return newGlobalReveals;
-    });
+    setUser(updatedUser);
+    saveAllUsers(updatedAllUsers);
+    saveGlobalReveals(updatedGlobalReveals);
 
-  }, [user, saveAllUsers, saveGlobalReveals]);
+  }, [user, allUsers, globalReveals, saveAllUsers, saveGlobalReveals]);
   
   const addBonusUnlocks = useCallback((amount: number) => {
-      if (user) {
-        const updatedUser: User = { ...user, dailyUnlocks: user.dailyUnlocks + amount };
-        setUser(updatedUser);
-        setAllUsers(currentAllUsers => {
-            const updatedUsers = { ...currentAllUsers, [user.email]: updatedUser };
-            saveAllUsers(updatedUsers);
-            return updatedUsers;
-        });
-      }
-  }, [user, saveAllUsers]);
+      if (!user) return;
+
+      const updatedUser: User = { ...user, dailyUnlocks: user.dailyUnlocks + amount };
+      const updatedAllUsers = { ...allUsers, [user.email]: updatedUser };
+      
+      setUser(updatedUser);
+      saveAllUsers(updatedAllUsers);
+  }, [user, allUsers, saveAllUsers]);
 
   const updateProfileUrl = useCallback((url: string) => {
-    setUser(currentUser => {
-        if (!currentUser) return null;
-        const updatedUser: User = { ...currentUser, profileUrl: url };
+    if (!user) return;
+    
+    const updatedUser: User = { ...user, profileUrl: url };
+    const updatedAllUsers = { ...allUsers, [user.email]: updatedUser };
 
-        setAllUsers(currentAllUsers => {
-            const updatedUsers = { ...currentAllUsers, [updatedUser.email]: updatedUser };
-            saveAllUsers(updatedUsers);
-            return updatedUsers;
-        });
-
-        setGlobalReveals(currentGlobalReveals => {
-            const newGlobalReveals = new Map(currentGlobalReveals);
-            let changed = false;
-            for (const blockIndex of updatedUser.revealedBlocks) {
-                if (newGlobalReveals.has(blockIndex)) {
-                    newGlobalReveals.set(blockIndex, { username: updatedUser.username, profileUrl: url });
-                    changed = true;
-                }
-            }
-            if (changed) {
-                saveGlobalReveals(newGlobalReveals);
-            }
-            return newGlobalReveals;
-        });
-        
-        return updatedUser;
-    });
-  }, [saveAllUsers, saveGlobalReveals]);
+    const updatedGlobalReveals = new Map(globalReveals);
+    let changed = false;
+    for (const blockIndex of updatedUser.revealedBlocks) {
+        const revealData = updatedGlobalReveals.get(blockIndex);
+        if (revealData && revealData.username === updatedUser.username) {
+             updatedGlobalReveals.set(blockIndex, { username: updatedUser.username, profileUrl: url });
+             changed = true;
+        }
+    }
+    
+    setUser(updatedUser);
+    saveAllUsers(updatedAllUsers);
+    if (changed) {
+        saveGlobalReveals(updatedGlobalReveals);
+    }
+  }, [user, allUsers, globalReveals, saveAllUsers, saveGlobalReveals]);
 
   // --- Admin Functions ---
   const updateImageAndReset = useCallback((newImageUrl: string) => {
     if (!newImageUrl) return;
     saveToStorage(IMAGE_URL_KEY, newImageUrl);
-    saveGlobalReveals(new Map());
+    const newGlobalReveals = new Map();
+    saveGlobalReveals(newGlobalReveals);
     
-    setAllUsers(currentAllUsers => {
-        const updatedUsers = {...currentAllUsers};
-        for (const email in updatedUsers) {
-          updatedUsers[email].revealedBlocks = new Set();
-        }
-        saveAllUsers(updatedUsers);
-        return updatedUsers;
-    });
+    const currentAllUsers = allUsers;
+    const updatedUsers = {...currentAllUsers};
+    for (const email in updatedUsers) {
+      updatedUsers[email] = { ...updatedUsers[email], revealedBlocks: new Set() };
+    }
+    saveAllUsers(updatedUsers);
 
     setImageUrl(newImageUrl);
 
     alert("Image updated and all progress has been reset! The page will now reload.");
     window.location.hash = '';
     window.location.reload();
-  }, [saveAllUsers, saveGlobalReveals]);
+  }, [allUsers, saveAllUsers, saveGlobalReveals]);
   
-  const getAllUsersForAdmin = useCallback(() => {
+  const getAllUsersForAdmin = useCallback((): User[] => {
      return Object.values(loadFromStorage<Record<string, User>>(ALL_USERS_KEY, {}));
   }, []);
 
