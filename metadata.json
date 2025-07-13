@@ -1,0 +1,5 @@
+{
+  "name": "Stray Kids - Unveil the Image",
+  "description": "An interactive web application for Stray Kids fans (STAYs) to collaboratively reveal a hidden image of the group. Users can unlock a few pixels each day, slowly uncovering the full picture together. Features a daily unlock limit, user persistence, and a shareable QR code.",
+  "requestFramePermissions": []
+}
